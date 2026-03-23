@@ -127,10 +127,9 @@ def load_models():
     except Exception:
         model_kl = None
 
-    # embedding model (may have been trained with an embedding dim)
+    # embedding model
     try:
-        # emb_input_dim = _infer_input_dim_from_state("emb_model.pth")
-        emb_input_dim = 384  # hardcoded
+        emb_input_dim = 384
         model_emb = EntropyClassifier(input_dim=emb_input_dim).to(device)
         model_emb.load_state_dict(torch.load("emb_model.pth", map_location=device))
         model_emb.eval()
@@ -139,7 +138,6 @@ def load_models():
 
     # combined model (expects entropy + kl + embedding_dim)
     try:
-        # comb_input_dim = _infer_input_dim_from_state("combined_model.pth")
         comb_input_dim = 386  # 2 + 384
         model_comb = EntropyClassifier(input_dim=comb_input_dim).to(device)
         model_comb.load_state_dict(torch.load("combined_model.pth", map_location=device))
