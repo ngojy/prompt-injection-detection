@@ -4,6 +4,7 @@ import numpy as np
 import math
 from collections import Counter
 from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.naive_bayes import MultinomialNB
 import pickle
 
 device = torch.device("cpu")
@@ -27,6 +28,30 @@ def kl_divergence(p, q):
     p = np.array(p, dtype=np.float64) + 1e-10
     q = np.array(q, dtype=np.float64) + 1e-10
     return np.sum(np.where(p != 0, p * np.log2(p / q), 0))
+
+# Naive Bayes classifier for text
+class NaiveBayesClassifier:
+    def __init__(self):
+        self.vectorizer = CountVectorizer(max_features=5000, stop_words='english')
+        self.classifier = MultinomialNB()
+        self.is_fitted = False
+    
+    def fit(self, texts, labels):
+        X = self.vectorizer.fit_transform(texts)
+        self.classifier.fit(X, labels)
+        self.is_fitted = True
+    
+    def predict_proba(self, texts):
+        if not self.is_fitted:
+            raise ValueError("Classifier must be fitted before prediction")
+        X = self.vectorizer.transform(texts)
+        return self.classifier.predict_proba(X)
+    
+    def predict(self, texts):
+        if not self.is_fitted:
+            raise ValueError("Classifier must be fitted before prediction")
+        X = self.vectorizer.transform(texts)
+        return self.classifier.predict(X)
 
 # Embedding model loading
 try:
@@ -111,6 +136,7 @@ def load_models():
     model_kl = None
     model_emb = None
     model_comb = None
+    model_nb = None
 
     # entropy & kl (single-dim inputs)
     try:
@@ -136,16 +162,23 @@ def load_models():
     except Exception:
         model_emb = None
 
-    # combined model (expects entropy + kl + embedding_dim)
+    # combined model (expects entropy + kl + embedding_dim + naive_bayes)
     try:
-        comb_input_dim = 386  # 2 + 384
+        comb_input_dim = 387  # 2 + 384 + 1
         model_comb = EntropyClassifier(input_dim=comb_input_dim).to(device)
         model_comb.load_state_dict(torch.load("combined_model.pth", map_location=device))
         model_comb.eval()
     except Exception:
         model_comb = None
 
-    return model_entropy, model_kl, model_emb, model_comb
+    # naive bayes model
+    try:
+        with open("naive_bayes_model.pkl", "rb") as f:
+            model_nb = pickle.load(f)
+    except Exception:
+        model_nb = None
+
+    return model_entropy, model_kl, model_emb, model_comb, model_nb
 
 
 # Prediction
@@ -180,7 +213,7 @@ def predict_text(text, feature_extractor, model, mode="entropy"):
             if mode == "emb":
                 expected_emb_dim = total_in if total_in is not None else 384
             else:  # comb
-                expected_emb_dim = (total_in - 2) if (total_in is not None and total_in > 2) else 0
+                expected_emb_dim = (total_in - 3) if (total_in is not None and total_in > 3) else 0  # -3 for entropy, kl, nb
 
             # prefer runtime embedding model if available
             emb_model = load_embedding_model()
@@ -199,8 +232,16 @@ def predict_text(text, feature_extractor, model, mode="entropy"):
 
             if mode == "emb":
                 inp = torch.tensor(emb.reshape(1, -1), dtype=torch.float32).to(device)
-            else:  # comb: [entropy, kl, emb...]
-                arr = np.concatenate([[features[0]], [features[1]], emb])
+            else:  # comb: [entropy, kl, emb..., nb_prob]
+                # Get naive Bayes prediction
+                try:
+                    with open("naive_bayes_model.pkl", "rb") as f:
+                        nb_model = pickle.load(f)
+                    nb_result = predict_nb_text(text, nb_model)
+                    nb_prob = nb_result.get('prob', 0.0)
+                except Exception:
+                    nb_prob = 0.0  # fallback if NB model not available
+                arr = np.concatenate([[features[0]], [features[1]], emb, [nb_prob]])
                 inp = torch.tensor(arr.reshape(1, -1), dtype=torch.float32).to(device)
         else:
             return {"label": "N/A", "prob": 0.0}
@@ -215,5 +256,20 @@ def predict_text(text, feature_extractor, model, mode="entropy"):
             prob = float(out[0]) if out.size > 0 else 0.0
             label = "Malicious" if prob > 0.5 else "Benign"
             return {"label": label, "prob": prob}
+    except Exception:
+        return {"label": "N/A", "prob": 0.0}
+
+def predict_nb_text(text, model):
+    """
+    Predict using naive Bayes model
+    """
+    if model is None:
+        return {"label": "N/A", "prob": 0.0}
+    
+    try:
+        probs = model.predict_proba([text])
+        prob = float(probs[0][1])  # probability of class 1 (malicious)
+        label = "Malicious" if prob > 0.5 else "Benign"
+        return {"label": label, "prob": prob}
     except Exception:
         return {"label": "N/A", "prob": 0.0}
