@@ -53,7 +53,7 @@ class NaiveBayesClassifier:
         X = self.vectorizer.transform(texts)
         return self.classifier.predict(X)
 
-# Embedding model loading
+# Embedding model
 try:
     from sentence_transformers import SentenceTransformer
 except Exception:
@@ -96,20 +96,20 @@ class EntropyKLFeatureExtractor:
 
 # Neural network model
 class EntropyClassifier(nn.Module):
-    def __init__(self, input_dim):
-        super(EntropyClassifier, self).__init__()
+    def __init__(self, input_dim, dropout=0.3):
+        super().__init__()
         self.model = nn.Sequential(
             nn.Linear(input_dim, 16),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(16, 8),
             nn.ReLU(),
-            nn.Linear(8, 1),
-            nn.Sigmoid()
+            nn.Dropout(dropout / 2),
+            nn.Linear(8, 1)
         )
 
     def forward(self, x):
-        x = self.model(x)
-        return x
+        return self.model(x)
 
 # Load Feature Extractor
 def load_feature_extractor(path="feature_extractor.pkl"):
@@ -253,7 +253,11 @@ def predict_text(text, feature_extractor, model, mode="entropy"):
         model.eval()
         with torch.no_grad():
             out = model(inp).cpu().numpy().flatten()
-            prob = float(out[0]) if out.size > 0 else 0.0
+            if out.size > 0:
+                # Apply sigmoid to convert logit to probability
+                prob = float(torch.sigmoid(torch.tensor(out[0], dtype=torch.float32)).item())
+            else:
+                prob = 0.0
             label = "Malicious" if prob > 0.5 else "Benign"
             return {"label": label, "prob": prob}
     except Exception:

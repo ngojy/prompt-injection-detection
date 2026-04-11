@@ -40,7 +40,7 @@ def send_message():
         # update status labels
         lbl_status_entropy.config(text=f"Entropy Model:  {model_status_text(model_entropy)}")
         lbl_status_kl.config(text=f"KL Divergence Model: {model_status_text(model_kl)}")
-        lbl_status_nb.config(text=f"NaiveBayes Model:    {model_status_text(model_nb)}")
+        lbl_status_nb.config(text=f"Naive Bayes Model:    {model_status_text(model_nb)}")
         lbl_status_emb.config(text=f"Embedding Model:    {model_status_text(model_emb)}")
         lbl_status_comb.config(text=f"Combined Model:    {model_status_text(model_comb)}")
     user_text = entry.get().strip()
@@ -84,7 +84,7 @@ def send_message():
         show_graph()
 
         # Append short summary to chat box with colored tag
-        for name, r in [("Entropy", res_e), ("KL", res_kl), ("Emb", res_emb), ("Comb", res_comb), ("NB", res_nb)]:
+        for name, r in [("Entropy", res_e), ("KL", res_kl), ("Naive Bayes", res_nb),("Embeddings", res_emb), ("Combined", res_comb)]:
             tag = "malicious" if r.get("label","Benign") == "Malicious" else "benign"
             chat_box.config(state="normal")
             chat_box.insert(tk.END, f"{name}: {r.get('label','?')} (p={r.get('prob',0):.3f})\n", tag)
