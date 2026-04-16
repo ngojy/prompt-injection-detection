@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 import math
 from collections import Counter
-from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
 import pickle
 
@@ -25,25 +25,33 @@ def shannon_entropy(text):
 
 # KL divergence calculation
 def kl_divergence(p, q):
-    p = np.array(p, dtype=np.float64) + 1e-10
+    p = np.array(p, dtype=np.float64) + 1e-10 # small epsilon to avoid log(0)
     q = np.array(q, dtype=np.float64) + 1e-10
-    return np.sum(np.where(p != 0, p * np.log2(p / q), 0))
+    return np.sum(p * np.log(p / q))
 
 # Naive Bayes classifier for text
 class NaiveBayesClassifier:
-    def __init__(self):
-        self.vectorizer = CountVectorizer(max_features=5000, stop_words='english')
+    def __init__(self, use_tfidf=True):
+        # TfidfVectorizer weighs words by importance (rare words across docs get higher weight)
+        # CountVectorizer just counts raw word occurrences
+        if use_tfidf:
+            self.vectorizer = TfidfVectorizer(max_features=5000, stop_words='english')
+        else:
+            self.vectorizer = CountVectorizer(max_features=5000, stop_words='english')
         self.classifier = MultinomialNB()
         self.is_fitted = False
     
     def fit(self, texts, labels):
+        # Convert raw texts into a numerical feature matrix (sparse matrix of word counts/tfidf scores)
         X = self.vectorizer.fit_transform(texts)
         self.classifier.fit(X, labels)
         self.is_fitted = True
     
     def predict_proba(self, texts):
+        # Ensure the model is trained before trying to predict
         if not self.is_fitted:
             raise ValueError("Classifier must be fitted before prediction")
+        # Transform new texts using the same vocabulary learned during fit
         X = self.vectorizer.transform(texts)
         return self.classifier.predict_proba(X)
     
