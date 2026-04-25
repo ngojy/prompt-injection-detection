@@ -20,6 +20,7 @@ model_kl = None
 model_nb = None
 model_emb = None
 model_comb = None
+scalers = None
 
 # Store latest predictions for graphing
 latest_predictions = None
@@ -31,12 +32,12 @@ def model_status_text(model):
     return "Loaded" if model is not None else "Missing"
 
 def send_message():
-    global feature_extractor, model_entropy, model_kl, model_nb, model_emb, model_comb
+    global feature_extractor, model_entropy, model_kl, model_nb, model_emb, model_comb, scalers
 
     # Lazy-load feature extractor and models on first message
     if feature_extractor is None:
         feature_extractor = load_feature_extractor()
-        model_entropy, model_kl, model_emb, model_comb, model_nb = load_models()
+        model_entropy, model_kl, model_nb, model_emb, model_comb, scalers = load_models()
         # update status labels
         lbl_status_entropy.config(text=f"Entropy Model:  {model_status_text(model_entropy)}")
         lbl_status_kl.config(text=f"KL Divergence Model: {model_status_text(model_kl)}")
@@ -56,11 +57,11 @@ def send_message():
         chat_box.config(state="disabled")
 
         # Get per-model predictions
-        res_e = predict_text(user_text, feature_extractor, model_entropy, mode="entropy")
-        res_kl = predict_text(user_text, feature_extractor, model_kl, mode="kl")
+        res_e = predict_text(user_text, feature_extractor, model_entropy, mode="entropy", scalers=scalers)
+        res_kl = predict_text(user_text, feature_extractor, model_kl, mode="kl", scalers=scalers)
         res_nb = predict_nb_text(user_text, model_nb)
-        res_emb = predict_text(user_text, feature_extractor, model_emb, mode="emb")
-        res_comb = predict_text(user_text, feature_extractor, model_comb, mode="comb")
+        res_emb = predict_text(user_text, feature_extractor, model_emb, mode="emb", scalers=scalers)
+        res_comb = predict_text(user_text, feature_extractor, model_comb, mode="comb", scalers=scalers)
 
         # Store predictions for graphing
         global latest_predictions

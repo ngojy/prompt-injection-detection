@@ -142,9 +142,10 @@ def load_feature_extractor(path="feature_extractor.pkl"):
 def load_models():
     model_entropy = None
     model_kl = None
+    model_nb = None
     model_emb = None
     model_comb = None
-    model_nb = None
+    scalers = {}
 
     # entropy & kl (single-dim inputs)
     try:
@@ -170,9 +171,9 @@ def load_models():
     except Exception:
         model_emb = None
 
-    # combined model (expects entropy + kl + embedding_dim + naive_bayes)
+    # combined model (expects entropy + kl + naive_bayes + embedding_dim) = 1 + 1 + 1 + 384 = 387 input features
     try:
-        comb_input_dim = 387  # 2 + 384 + 1
+        comb_input_dim = 387
         model_comb = EntropyClassifier(input_dim=comb_input_dim).to(device)
         model_comb.load_state_dict(torch.load("combined_model.pth", map_location=device))
         model_comb.eval()
@@ -186,86 +187,111 @@ def load_models():
     except Exception:
         model_nb = None
 
-    return model_entropy, model_kl, model_emb, model_comb, model_nb
+    for name in ["entropy", "kl", "nb", "emb"]:
+        try:
+            with open(f"scaler_{name}.pkl", "rb") as f:
+                scalers[name] = pickle.load(f)
+        except Exception:
+            scalers[name] = None
+
+    return model_entropy, model_kl, model_nb, model_emb, model_comb, scalers
 
 
 # Prediction
-def predict_text(text, feature_extractor, model, mode="entropy"):
-    """
-    mode: "entropy", "kl", "emb", or "comb"
-    If embedding encoder is available it will be used; otherwise a zero-vector fallback is used.
-    """
+def predict_text(text, feature_extractor, model, mode, scalers=None):
     if model is None:
         return {"label": "N/A", "prob": 0.0}
 
-    # compute base features
     try:
-        features = feature_extractor.extract_features(text)  # [entropy, kl, special_ratio, length]
+        features = feature_extractor.extract_features(text)
     except Exception:
         return {"label": "N/A", "prob": 0.0}
 
-    # build input tensor
+    def scale_scalar(value, key):
+        """Scale a single scalar value using the fitted scaler."""
+        if scalers and scalers.get(key) is not None:
+            return float(scalers[key].transform([[value]])[0][0])
+        return float(value)
+
+    def scale_array(arr_2d, key):
+        """Scale a 2D array (e.g. 1×384 embedding) using the fitted scaler."""
+        if scalers and scalers.get(key) is not None:
+            return scalers[key].transform(arr_2d)
+        return arr_2d
+
     try:
         if mode == "entropy":
-            inp = torch.tensor([[features[0]]], dtype=torch.float32).to(device)
+            val = scale_scalar(features[0], "entropy")
+            inp = torch.tensor([[val]], dtype=torch.float32).to(device)
+
         elif mode == "kl":
-            inp = torch.tensor([[features[1]]], dtype=torch.float32).to(device)
-        elif mode in ("emb", "comb"):
-            # determine expected embedding dims from model if possible
-            total_in = None
-            try:
-                total_in = model.model[0].weight.shape[1]
-            except Exception:
-                total_in = None
+            val = scale_scalar(features[1], "kl")
+            inp = torch.tensor([[val]], dtype=torch.float32).to(device)
 
-            if mode == "emb":
-                expected_emb_dim = total_in if total_in is not None else 384
-            else:  # comb
-                expected_emb_dim = (total_in - 3) if (total_in is not None and total_in > 3) else 0  # -3 for entropy, kl, nb
-
-            # prefer runtime embedding model if available
+        elif mode == "emb":
             emb_model = load_embedding_model()
-            if emb_model is not None:
-                emb = emb_model.encode([text], convert_to_numpy=True)[0].astype(np.float32)
-            else:
-                emb = np.zeros(expected_emb_dim, dtype=np.float32)
+            emb = (
+                emb_model.encode([text], convert_to_numpy=True)[0].astype(np.float32)
+                if emb_model is not None
+                else np.zeros(384, dtype=np.float32)
+            )
+            emb_scaled = scale_array(emb.reshape(1, -1), "emb")  # shape (1, 384)
+            inp = torch.tensor(emb_scaled, dtype=torch.float32).to(device)
 
-            # if runtime embedding size doesn't match expected, pad/truncate
-            if expected_emb_dim is not None and expected_emb_dim > 0:
-                if emb.shape[0] != expected_emb_dim:
-                    if emb.shape[0] > expected_emb_dim:
-                        emb = emb[:expected_emb_dim]
-                    else:
-                        emb = np.pad(emb, (0, expected_emb_dim - emb.shape[0]), mode="constant", constant_values=0.0)
+        elif mode == "comb":
+            # Get NB probability
+            try:
+                with open("naive_bayes_model.pkl", "rb") as f:
+                    nb_model = pickle.load(f)
+                nb_prob = float(predict_nb_text(text, nb_model).get("prob", 0.0))
+            except Exception:
+                nb_prob = 0.0
 
-            if mode == "emb":
-                inp = torch.tensor(emb.reshape(1, -1), dtype=torch.float32).to(device)
-            else:  # comb: [entropy, kl, emb..., nb_prob]
-                # Get naive Bayes prediction
-                try:
-                    with open("naive_bayes_model.pkl", "rb") as f:
-                        nb_model = pickle.load(f)
-                    nb_result = predict_nb_text(text, nb_model)
-                    nb_prob = nb_result.get('prob', 0.0)
-                except Exception:
-                    nb_prob = 0.0  # fallback if NB model not available
-                arr = np.concatenate([[features[0]], [features[1]], emb, [nb_prob]])
-                inp = torch.tensor(arr.reshape(1, -1), dtype=torch.float32).to(device)
+            # Get embedding
+            emb_model = load_embedding_model()
+            emb = (
+                emb_model.encode([text], convert_to_numpy=True)[0].astype(np.float32)
+                if emb_model is not None
+                else np.zeros(384, dtype=np.float32)
+            )
+
+            # Scale each feature independently using its own scaler
+            entropy_s = scale_scalar(features[0], "entropy") # scalar
+            kl_s      = scale_scalar(features[1], "kl") # scalar
+            nb_s      = scale_scalar(nb_prob, "nb") # scalar
+            emb_s     = scale_array(emb.reshape(1, -1), "emb") # shape (1, 384)
+
+            # Concatenate in same order as training:
+            # [entropy(1), kl(1), nb(1), emb(384)] = 387
+            arr = np.hstack([
+                [[entropy_s]],  # (1, 1)
+                [[kl_s]],       # (1, 1)
+                [[nb_s]],       # (1, 1)
+                emb_s           # (1, 384)
+            ]).astype(np.float32)
+            inp = torch.tensor(arr, dtype=torch.float32).to(device)
+
         else:
             return {"label": "N/A", "prob": 0.0}
+
     except Exception:
         return {"label": "N/A", "prob": 0.0}
 
-    # run model
     try:
         model.eval()
         with torch.no_grad():
             out = model(inp).cpu().numpy().flatten()
-            if out.size > 0:
-                # Apply sigmoid to convert logit to probability
-                prob = float(torch.sigmoid(torch.tensor(out[0], dtype=torch.float32)).item())
-            else:
-                prob = 0.0
+            prob = float(torch.sigmoid(torch.tensor(out[0], dtype=torch.float32)).item()) if out.size > 0 else 0.0
+            label = "Malicious" if prob > 0.5 else "Benign"
+            return {"label": label, "prob": prob}
+    except Exception:
+        return {"label": "N/A", "prob": 0.0}
+
+    try:
+        model.eval()
+        with torch.no_grad():
+            out = model(inp).cpu().numpy().flatten()
+            prob = float(torch.sigmoid(torch.tensor(out[0], dtype=torch.float32)).item()) if out.size > 0 else 0.0
             label = "Malicious" if prob > 0.5 else "Benign"
             return {"label": label, "prob": prob}
     except Exception:
