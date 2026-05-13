@@ -118,6 +118,31 @@ class EntropyClassifier(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+    
+# Combined model with early fusion
+class CombinedModelEarlyFusion(nn.Module):
+    def __init__(self, embedding_dim, scalar_dim=3, projection_dim=32, dropout=0.3):
+        super().__init__()
+        self.scalar_proj = nn.Sequential(
+            nn.Linear(scalar_dim, projection_dim),
+            nn.ReLU()
+        )
+
+        self.model = nn.Sequential(
+            nn.Linear(embedding_dim + projection_dim, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout / 2),
+            nn.Linear(32, 1)
+        )
+
+    def forward(self, x):
+        x_emb    = x[:, :-3]          
+        x_scalar = x[:, -3:]          
+        x_scalar = self.scalar_proj(x_scalar)
+        return self.model(torch.cat([x_emb, x_scalar], dim=1))
 
 # Load Feature Extractor
 def load_feature_extractor(path="feature_extractor.pkl"):
@@ -131,8 +156,6 @@ def load_feature_extractor(path="feature_extractor.pkl"):
         class _FallbackExtractor:
             def extract_features(self, text):
                 e = shannon_entropy(text)
-                # KL requires a benign distribution; return 0.0 as a
-                # conservative default for missing artifact.
                 kl = 0.0
                 specical_ratio = sum(not c.isalnum() for c in text) / (len(text) + 1e-10)
                 return np.array([e, kl, specical_ratio, len(text)], dtype=np.float32)
@@ -144,7 +167,8 @@ def load_models():
     model_kl = None
     model_nb = None
     model_emb = None
-    model_comb = None
+    model_early = None
+    model_late = None
     scalers = {}
 
     # entropy & kl (single-dim inputs)
@@ -162,24 +186,6 @@ def load_models():
     except Exception:
         model_kl = None
 
-    # embedding model
-    try:
-        emb_input_dim = 384
-        model_emb = EntropyClassifier(input_dim=emb_input_dim).to(device)
-        model_emb.load_state_dict(torch.load("emb_model.pth", map_location=device))
-        model_emb.eval()
-    except Exception:
-        model_emb = None
-
-    # combined model (expects entropy + kl + naive_bayes + embedding_dim) = 1 + 1 + 1 + 384 = 387 input features
-    try:
-        comb_input_dim = 387
-        model_comb = EntropyClassifier(input_dim=comb_input_dim).to(device)
-        model_comb.load_state_dict(torch.load("combined_model.pth", map_location=device))
-        model_comb.eval()
-    except Exception:
-        model_comb = None
-
     # naive bayes model
     try:
         with open("naive_bayes_model.pkl", "rb") as f:
@@ -194,11 +200,37 @@ def load_models():
         except Exception:
             scalers[name] = None
 
-    return model_entropy, model_kl, model_nb, model_emb, model_comb, scalers
+    # embedding model
+    try:
+        emb_input_dim = 384
+        model_emb = EntropyClassifier(input_dim=emb_input_dim).to(device)
+        model_emb.load_state_dict(torch.load("emb_model.pth", map_location=device))
+        model_emb.eval()
+    except Exception:
+        model_emb = None
+
+    # combined early model (expects entropy + kl + naive_bayes + embedding_dim) = 416 input features
+    try:
+        comb_input_dim = 416
+        model_comb = CombinedModelEarlyFusion(input_dim=comb_input_dim).to(device)
+        model_comb.load_state_dict(torch.load("combined_early_model.pth", map_location=device))
+        model_comb.eval()
+    except Exception:
+        model_comb = None
+
+    # combined late fusion stacking model (meta-model is logistic regression on top of base model probabilities)
+    try:
+        with open("combined_late_meta_model.pkl", "rb") as f:
+            model_late = pickle.load(f)
+    except Exception:
+        model_late = None
+
+    return model_entropy, model_kl, model_nb, model_emb, model_early, model_late, scalers
 
 
 # Prediction
-def predict_text(text, feature_extractor, model, mode, scalers=None):
+def predict_text(text, feature_extractor, model, mode, scalers=None,
+                 nb_model=None, meta_model=None, model_entropy=None, model_kl=None, model_emb=None):
     if model is None:
         return {"label": "N/A", "prob": 0.0}
 
@@ -218,6 +250,23 @@ def predict_text(text, feature_extractor, model, mode, scalers=None):
         if scalers and scalers.get(key) is not None:
             return scalers[key].transform(arr_2d)
         return arr_2d
+    
+    def get_embedding():
+        """Encode text using sentence transformer, fallback to zeros if unavailable."""
+        emb_model = load_embedding_model()
+        if emb_model is not None:
+            return emb_model.encode([text], convert_to_numpy=True)[0].astype(np.float32)
+        return np.zeros(384, dtype=np.float32)
+    
+    def run_nn(model, tensor):
+        """Run a neural network model and return sigmoid probability."""
+        if model is None:
+            return 0.0
+        model.eval()
+        with torch.no_grad():
+            out  = model(tensor).cpu().numpy().flatten()
+            prob = float(torch.sigmoid(torch.tensor(out[0], dtype=torch.float32)).item()) if out.size > 0 else 0.0
+        return prob
 
     try:
         if mode == "entropy":
@@ -229,16 +278,12 @@ def predict_text(text, feature_extractor, model, mode, scalers=None):
             inp = torch.tensor([[val]], dtype=torch.float32).to(device)
 
         elif mode == "emb":
-            emb_model = load_embedding_model()
-            emb = (
-                emb_model.encode([text], convert_to_numpy=True)[0].astype(np.float32)
-                if emb_model is not None
-                else np.zeros(384, dtype=np.float32)
-            )
+            emb = get_embedding()
             emb_scaled = scale_array(emb.reshape(1, -1), "emb")  # shape (1, 384)
             inp = torch.tensor(emb_scaled, dtype=torch.float32).to(device)
-
-        elif mode == "comb":
+        
+        # ── Combined Early Fusion ─────────────────────────────────────────────
+        elif mode == "comb_ef":
             # Get NB probability
             try:
                 with open("naive_bayes_model.pkl", "rb") as f:
@@ -248,42 +293,77 @@ def predict_text(text, feature_extractor, model, mode, scalers=None):
                 nb_prob = 0.0
 
             # Get embedding
-            emb_model = load_embedding_model()
-            emb = (
-                emb_model.encode([text], convert_to_numpy=True)[0].astype(np.float32)
-                if emb_model is not None
-                else np.zeros(384, dtype=np.float32)
-            )
+            emb = get_embedding()
 
-            # Scale each feature independently using its own scaler
-            entropy_s = scale_scalar(features[0], "entropy") # scalar
-            kl_s      = scale_scalar(features[1], "kl") # scalar
-            nb_s      = scale_scalar(nb_prob, "nb") # scalar
-            emb_s     = scale_array(emb.reshape(1, -1), "emb") # shape (1, 384)
+            # Scale each feature independently
+            entropy_s = scale_scalar(features[0], "entropy")         # scalar
+            kl_s      = scale_scalar(features[1], "kl")              # scalar
+            nb_s      = scale_scalar(nb_prob,     "nb")              # scalar
+            emb_s     = scale_array(emb.reshape(1, -1), "emb")       # (1, 384)
 
             # Concatenate in same order as training:
-            # [entropy(1), kl(1), nb(1), emb(384)] = 387
+            # [emb(384) | entropy(1) | kl(1) | nb(1)] = 387
+            # CombinedModelEarlyFusion internally splits:
+            #   x[:, :-3] → embedding branch
+            #   x[:, -3:] → scalar projection branch
             arr = np.hstack([
+                emb_s,          # (1, 384)
                 [[entropy_s]],  # (1, 1)
                 [[kl_s]],       # (1, 1)
                 [[nb_s]],       # (1, 1)
-                emb_s           # (1, 384)
             ]).astype(np.float32)
             inp = torch.tensor(arr, dtype=torch.float32).to(device)
+        
+        # ── Combined Late Fusion Stacking ─────────────────────────────────────
+        elif mode == "comb_lf":
+            if meta_model is None:
+                return {"label": "N/A", "prob": 0.0}
+    
+            # Scale features for base model inference
+            try:
+                with open("naive_bayes_model.pkl", "rb") as f:
+                    nb_model = pickle.load(f)
+                nb_prob = float(predict_nb_text(text, nb_model).get("prob", 0.0))
+            except Exception:
+                nb_prob = 0.0
 
-        else:
-            return {"label": "N/A", "prob": 0.0}
+            # Get embedding
+            emb = get_embedding()
+            emb_scaled = scale_array(emb.reshape(1, -1), "emb")
 
-    except Exception:
-        return {"label": "N/A", "prob": 0.0}
+            entropy_s = scale_scalar(features[0], "entropy")
+            kl_s      = scale_scalar(features[1], "kl")
 
-    try:
-        model.eval()
-        with torch.no_grad():
-            out = model(inp).cpu().numpy().flatten()
-            prob = float(torch.sigmoid(torch.tensor(out[0], dtype=torch.float32)).item()) if out.size > 0 else 0.0
+            # Run each base model independently to get probability outputs
+            p_entropy = run_nn(
+                model_entropy,
+                torch.tensor([[entropy_s]], dtype=torch.float32).to(device)
+            )
+            p_kl = run_nn(
+                model_kl,
+                torch.tensor([[kl_s]], dtype=torch.float32).to(device)
+            )
+            p_emb = run_nn(
+                model_emb,
+                torch.tensor(emb_scaled, dtype=torch.float32).to(device)
+            )
+            p_nb = nb_prob
+
+            # Stack base model probabilities into meta-feature vector
+            # Order matches training: [entropy, kl, emb, nb]
+            meta_features = np.array(
+                [[p_entropy, p_kl, p_emb, p_nb]],
+                dtype=np.float32
+            )
+
+            # Meta-model prediction (logistic regression — no sigmoid needed)
+            prob  = float(meta_model.predict_proba(meta_features)[0][1])
             label = "Malicious" if prob > 0.5 else "Benign"
             return {"label": label, "prob": prob}
+        
+        else:
+            return {"label": "N/A", "prob": 0.0}
+        
     except Exception:
         return {"label": "N/A", "prob": 0.0}
 
