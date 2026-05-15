@@ -1,15 +1,14 @@
+import torch
+import matplotlib.pyplot as plt
+import matplotlib
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 import tkinter as tk
 from tkinter import ttk
 from model_utils import load_models, load_feature_extractor, predict_text, predict_nb_text
-import torch
-import matplotlib.pyplot as plt
-import matplotlib
 matplotlib.use('TkAgg')
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-import numpy as np
 
 device = torch.device("cpu")
 
@@ -19,7 +18,8 @@ model_entropy = None
 model_kl = None
 model_nb = None
 model_emb = None
-model_comb = None
+model_early = None
+model_late = None
 scalers = None
 
 # Store latest predictions for graphing
@@ -32,18 +32,19 @@ def model_status_text(model):
     return "Loaded" if model is not None else "Missing"
 
 def send_message():
-    global feature_extractor, model_entropy, model_kl, model_nb, model_emb, model_comb, scalers
+    global feature_extractor, model_entropy, model_kl, model_nb, model_emb, model_early, model_late, scalers
 
     # Lazy-load feature extractor and models on first message
     if feature_extractor is None:
         feature_extractor = load_feature_extractor()
-        model_entropy, model_kl, model_nb, model_emb, model_comb, scalers = load_models()
+        model_entropy, model_kl, model_nb, model_emb, model_early, model_late, scalers = load_models()
         # update status labels
-        lbl_status_entropy.config(text=f"Entropy Model:  {model_status_text(model_entropy)}")
+        lbl_status_entropy.config(text=f"Shannon Entropy Model:  {model_status_text(model_entropy)}")
         lbl_status_kl.config(text=f"KL Divergence Model: {model_status_text(model_kl)}")
         lbl_status_nb.config(text=f"Naive Bayes Model:    {model_status_text(model_nb)}")
         lbl_status_emb.config(text=f"Embedding Model:    {model_status_text(model_emb)}")
-        lbl_status_comb.config(text=f"Combined Model:    {model_status_text(model_comb)}")
+        lbl_status_comb_early.config(text=f"Combined (Early Fusion) Model:    {model_status_text(model_early)}")
+        lbl_status_comb_late.config(text=f"Combined (Late Fusion) Model:    {model_status_text(model_late)}")
     user_text = entry.get().strip()
     if not user_text:
         return
@@ -61,7 +62,10 @@ def send_message():
         res_kl = predict_text(user_text, feature_extractor, model_kl, mode="kl", scalers=scalers)
         res_nb = predict_nb_text(user_text, model_nb)
         res_emb = predict_text(user_text, feature_extractor, model_emb, mode="emb", scalers=scalers)
-        res_comb = predict_text(user_text, feature_extractor, model_comb, mode="comb", scalers=scalers)
+        res_early = predict_text(user_text, feature_extractor, model_early, mode="comb_ef", scalers=scalers, 
+                                model_nb=model_nb)
+        res_late = predict_text(user_text, feature_extractor, model_late, mode="comb_lf", scalers=scalers, 
+                                model_entropy=model_entropy, model_kl=model_kl, model_nb=model_nb, model_emb=model_emb, model_late=model_late)
 
         # Store predictions for graphing
         global latest_predictions
@@ -70,7 +74,8 @@ def send_message():
             'KL': res_kl.get('prob', 0),
             'Naive Bayes': res_nb.get('prob', 0),
             'Embeddings': res_emb.get('prob', 0),
-            'Combined': res_comb.get('prob', 0)
+            'Combined (Early)': res_early.get('prob', 0),
+            'Combined (Late)': res_late.get('prob', 0)
         }
         
         # Update results labels
@@ -79,13 +84,14 @@ def send_message():
         lbl_kl_val.config(text=fmt(res_kl))
         lbl_nb_val.config(text=fmt(res_nb))
         lbl_emb_val.config(text=fmt(res_emb))
-        lbl_comb_val.config(text=fmt(res_comb))
-        
+        lbl_comb_early_val.config(text=fmt(res_early))
+        lbl_comb_late_val.config(text=fmt(res_late))
+
         # Auto-display graph
         show_graph()
 
         # Append short summary to chat box with colored tag
-        for name, r in [("Entropy", res_e), ("KL", res_kl), ("Naive Bayes", res_nb),("Embeddings", res_emb), ("Combined", res_comb)]:
+        for name, r in [("Entropy", res_e), ("KL", res_kl), ("Naive Bayes", res_nb),("Embeddings", res_emb), ("Early", res_early), ("Late", res_late)]:
             tag = "malicious" if r.get("label","Benign") == "Malicious" else "benign"
             chat_box.config(state="normal")
             chat_box.insert(tk.END, f"{name}: {r.get('label','?')} (p={r.get('prob',0):.3f})\n", tag)
@@ -116,7 +122,7 @@ def show_graph():
     graph_figure = Figure(figsize=(5, 4), dpi=80)
     ax = graph_figure.add_subplot(111)
     
-    colors = ['#5975A4', '#5F9E6E', '#B55D60', '#8C7AA2', '#A8860B']
+    colors = ['#5975A4', '#5F9E6E', '#B55D60', '#8C7AA2', '#A8860B', '#4E9EA8']
     bars = ax.bar(models, probs, color=colors, edgecolor='black', linewidth=1.2, alpha=0.8)
     
     ax.set_facecolor('#E8E8E8')
@@ -147,7 +153,7 @@ def show_graph():
 # GUI setup
 root = tk.Tk()
 root.title("Prompt Injection Detector")
-root.geometry("900x650")
+root.geometry("900x700")
 
 style = ttk.Style(root)
 style.theme_use("clam")
@@ -174,16 +180,18 @@ chat_box.config(yscrollcommand=scrollbar.set)
 
 # Results panel
 ttk.Label(right, text="Model status", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0,6))
-lbl_status_entropy = ttk.Label(right, text=f"Entropy: {model_status_text(model_entropy)}")
+lbl_status_entropy = ttk.Label(right, text=f"Shannon Entropy: {model_status_text(model_entropy)}")
 lbl_status_entropy.pack(anchor="w")
-lbl_status_kl = ttk.Label(right, text=f"KL:      {model_status_text(model_kl)}")
+lbl_status_kl = ttk.Label(right, text=f"KL Divergence:      {model_status_text(model_kl)}")
 lbl_status_kl.pack(anchor="w")
-lbl_status_nb = ttk.Label(right, text=f"NB:      {model_status_text(model_nb)}")
+lbl_status_nb = ttk.Label(right, text=f"Naive Bayes:      {model_status_text(model_nb)}")
 lbl_status_nb.pack(anchor="w")
-lbl_status_emb = ttk.Label(right, text=f"Emb:     {model_status_text(model_emb)}")
+lbl_status_emb = ttk.Label(right, text=f"Embedding:     {model_status_text(model_emb)}")
 lbl_status_emb.pack(anchor="w")
-lbl_status_comb = ttk.Label(right, text=f"Comb:    {model_status_text(model_comb)}")
-lbl_status_comb.pack(anchor="w")
+lbl_status_comb_early = ttk.Label(right, text=f"Combined (Early):    {model_status_text(model_early)}")
+lbl_status_comb_early.pack(anchor="w")
+lbl_status_comb_late = ttk.Label(right, text=f"Combined (Late):    {model_status_text(model_late)}")
+lbl_status_comb_late.pack(anchor="w")
 
 ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
 
@@ -196,8 +204,10 @@ lbl_nb_val = ttk.Label(right, text="—")
 lbl_nb_val.pack(anchor="w")
 lbl_emb_val = ttk.Label(right, text="—")
 lbl_emb_val.pack(anchor="w")
-lbl_comb_val = ttk.Label(right, text="—")
-lbl_comb_val.pack(anchor="w")
+lbl_comb_early_val = ttk.Label(right, text="—")
+lbl_comb_early_val.pack(anchor="w")
+lbl_comb_late_val = ttk.Label(right, text="—")
+lbl_comb_late_val.pack(anchor="w")
 
 # Graph frame for pie chart
 graph_frame = ttk.Frame(right)

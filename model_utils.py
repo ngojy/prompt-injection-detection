@@ -211,26 +211,34 @@ def load_models():
 
     # combined early model (expects entropy + kl + naive_bayes + embedding_dim) = 416 input features
     try:
-        comb_input_dim = 416
-        model_comb = CombinedModelEarlyFusion(input_dim=comb_input_dim).to(device)
-        model_comb.load_state_dict(torch.load("combined_early_model.pth", map_location=device))
-        model_comb.eval()
+        early_input_dim = 384
+        model_early = CombinedModelEarlyFusion(embedding_dim=early_input_dim, scalar_dim=3).to(device)
+        model_early.load_state_dict(torch.load("combined_early_model.pth", map_location=device))
+        model_early.eval()
     except Exception:
-        model_comb = None
+        model_early = None
 
     # combined late fusion stacking model (meta-model is logistic regression on top of base model probabilities)
     try:
-        with open("combined_late_meta_model.pkl", "rb") as f:
+        with open("combined_late_model.pkl", "rb") as f:
             model_late = pickle.load(f)
     except Exception:
         model_late = None
+
+    # Load all four StandardScalers
+    for name in ["entropy", "kl", "nb", "emb"]:
+        try:
+            with open(f"scaler_{name}.pkl", "rb") as f:
+                scalers[name] = pickle.load(f)
+        except Exception:
+            scalers[name] = None
 
     return model_entropy, model_kl, model_nb, model_emb, model_early, model_late, scalers
 
 
 # Prediction
 def predict_text(text, feature_extractor, model, mode, scalers=None,
-                 nb_model=None, meta_model=None, model_entropy=None, model_kl=None, model_emb=None):
+                 model_entropy=None, model_kl=None, model_nb=None, model_emb=None, model_late=None):
     if model is None:
         return {"label": "N/A", "prob": 0.0}
 
@@ -287,8 +295,8 @@ def predict_text(text, feature_extractor, model, mode, scalers=None,
             # Get NB probability
             try:
                 with open("naive_bayes_model.pkl", "rb") as f:
-                    nb_model = pickle.load(f)
-                nb_prob = float(predict_nb_text(text, nb_model).get("prob", 0.0))
+                    model_nb = pickle.load(f)
+                nb_prob = float(predict_nb_text(text, model_nb).get("prob", 0.0))
             except Exception:
                 nb_prob = 0.0
 
@@ -316,14 +324,14 @@ def predict_text(text, feature_extractor, model, mode, scalers=None,
         
         # ── Combined Late Fusion Stacking ─────────────────────────────────────
         elif mode == "comb_lf":
-            if meta_model is None:
+            if model_late is None:
                 return {"label": "N/A", "prob": 0.0}
     
             # Scale features for base model inference
             try:
                 with open("naive_bayes_model.pkl", "rb") as f:
-                    nb_model = pickle.load(f)
-                nb_prob = float(predict_nb_text(text, nb_model).get("prob", 0.0))
+                    model_nb = pickle.load(f)
+                nb_prob = float(predict_nb_text(text, model_nb).get("prob", 0.0))
             except Exception:
                 nb_prob = 0.0
 
@@ -357,7 +365,7 @@ def predict_text(text, feature_extractor, model, mode, scalers=None,
             )
 
             # Meta-model prediction (logistic regression — no sigmoid needed)
-            prob  = float(meta_model.predict_proba(meta_features)[0][1])
+            prob  = float(model_late.predict_proba(meta_features)[0][1])
             label = "Malicious" if prob > 0.5 else "Benign"
             return {"label": label, "prob": prob}
         
