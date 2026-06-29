@@ -11,21 +11,21 @@ This repository implements a hybrid prompt injection detection pipeline using:
 - Early fusion and late fusion ensemble models
 
 Core components:
-- `main.ipynb` — training, evaluation, and artifact generation
-- `model_utils.py` — feature extraction, model definitions, and inference helpers
-- `chatbox.py` — Tkinter GUI for live prediction
+- `main.ipynb` ï¿½ training, evaluation, and artifact generation
+- `model_utils.py` ï¿½ feature extraction, model definitions, and inference helpers
+- `chatbox.py` ï¿½ Tkinter GUI for live prediction
 
 ## Models
 
 ### Individual models
-- **Entropy Model** — PyTorch classifier on Shannon entropy
-- **KL Divergence Model** — PyTorch classifier on KL divergence against a benign distribution
-- **Naive Bayes Model** — TF-IDF + `MultinomialNB`
-- **Embedding Model** — PyTorch classifier on sentence embeddings
+- **Entropy Model** ï¿½ PyTorch classifier on Shannon entropy
+- **KL Divergence Model** ï¿½ PyTorch classifier on KL divergence against a benign distribution
+- **Naive Bayes Model** ï¿½ TF-IDF + `MultinomialNB`
+- **Embedding Model** ï¿½ PyTorch classifier on sentence embeddings
 
 ### Ensemble models
-- **Combined Early Fusion** — PyTorch model combining embeddings with scalar features
-- **Combined Late Fusion** — stacked model using base model probabilities
+- **Combined Early Fusion** ï¿½ PyTorch model combining embeddings with scalar features
+- **Combined Late Fusion** ï¿½ stacked model using base model probabilities
 
 ## Features
 
@@ -99,13 +99,9 @@ prompt-injection-detection/
 +-- scaler_kl.pkl
 +-- scaler_emb.pkl
 +-- scaler_nb.pkl
-+-- checkpoint_Shannon_Entropy.pt
-+-- checkpoint_KL_Divergence.pt
-+-- checkpoint_Embeddings.pt
-+-- checkpoint_Combined_Early.pt
 +-- notebook_version/
-¦   +-- google_colab_version.ipynb
-¦   +-- vs_code_version.ipynb
+ï¿½   +-- google_colab_version.ipynb
+ï¿½   +-- vs_code_version.ipynb
 +-- version_check.py
 ```
 
